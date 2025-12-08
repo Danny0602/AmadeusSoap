@@ -824,6 +824,41 @@ class AmadeusSoap extends WsdlAnalyser
             }
         }
 
+        // HARDCODED: Valores fijos para retention line
+        $retentionMonths = 6;  // Siempre 6 meses
+        $cityCode = 'MTY';     // Siempre Monterrey
+        $freeText = 'HOTEL BOOKING RETENTION';
+
+        // Calcular passenger_count automáticamente
+        $passengerCount = $isMultiDimensional ? count($params) : 1;
+
+        // Buscar check_out_date en el primer pasajero
+        $checkOutDate = null;
+        if ($isMultiDimensional && isset($params[0]['check_out_date'])) {
+            $checkOutDate = $params[0]['check_out_date'];
+        }
+
+        // Calcular fecha de retención
+        if ($checkOutDate) {
+            // Con check_out_date: checkout + 7 días + 6 meses
+            $baseDate = \Carbon\Carbon::parse($checkOutDate)->addDays(7);
+            $retentionDate = $baseDate->copy()->addMonths($retentionMonths);
+
+            // VALIDAR límite de 361 días desde HOY (límite de Amadeus)
+            $maxDate = \Carbon\Carbon::now()->addDays(361);
+            if ($retentionDate->greaterThan($maxDate)) {
+                $retentionDate = $maxDate;
+            }
+        } else {
+            // Sin check_out_date: solo hoy + 7 días (tiempo normal, sin extensión)
+            $retentionDate = \Carbon\Carbon::now()->addDays(7);
+        }
+
+        // Formato DDMMYY para Amadeus: 03OCT23 -> 031023
+        $formattedDate = $retentionDate->format('dmy');
+
+       
+
         $body = [];
 
         $body['pnrActions'] = [
@@ -853,6 +888,44 @@ class AmadeusSoap extends WsdlAnalyser
         ];
 
         if ($type == 'create') {
+
+            $body['originDestinationDetails'] = [
+                'originDestination' => [],  // CRÍTICO: vacío pero requerido
+                'itineraryInfo' => [
+                    'elementManagementItinerary' => [
+                        'segmentName' => 'RU'  // RU = Miscellaneous/Retention segment
+                    ],
+                    'airAuxItinerary' => [  // CRÍTICO: todo va dentro de airAuxItinerary
+                        'travelProduct' => [
+                            'product' => [
+                                'depDate' => $formattedDate  // Fecha hasta que el PNR estará activo
+                            ],
+                            'boardpointDetail' => [
+                                'cityCode' => $cityCode  // Cualquier ciudad, usualmente mismo que officeId
+                            ],
+                            'company' => [
+                                'identification' => '1A'  // Siempre 1A (Amadeus)
+                            ]
+                        ],
+                        'messageAction' => [  // CORRECTO: messageAction (no itineraryMessageAction)
+                            'business' => [
+                                'function' => '32'  // Function code para retention
+                            ]
+                        ],
+                        'relatedProduct' => [
+                            'quantity' => $passengerCount,
+                            'status' => 'HK'  // HK = Have Kept (Confirmed)
+                        ],
+                        'freetextItinerary' => [  // Opcional pero recomendado
+                            'freetextDetail' => [
+                                'subjectQualifier' => '3'
+                            ],
+                            'longFreetext' => $freeText  // Hasta 199 caracteres
+                        ]
+                    ]
+                ]
+            ];
+
 
             if ($isMultiDimensional) {
                 foreach ($params as $key => $value) {
@@ -944,7 +1017,6 @@ class AmadeusSoap extends WsdlAnalyser
 
         return self::PNR_AddMultiElements([$body]);
     }
-
     protected function isMultiArrayWithException($a, $exceptions = []): bool
     {
         foreach ($a as $k => $v) {
@@ -1501,6 +1573,7 @@ class AmadeusSoap extends WsdlAnalyser
             ]
         ]);
     }
+
 
     /**
      * @throws Exception
