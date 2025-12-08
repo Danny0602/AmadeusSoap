@@ -1503,6 +1503,103 @@ class AmadeusSoap extends WsdlAnalyser
     }
 
     /**
+     * Agregar retention line (segmento RU) a un PNR existente
+     * ESTRUCTURA OFICIAL DE AMADEUS - Proporcionada por soporte técnico de Amadeus
+     *
+     * Los segmentos de hotel están disponibles hasta 7 días después del check-out.
+     * Para mantenerlos activos por más tiempo, agregar segmento RU (retention line).
+     * Máximo: 361 días desde la fecha de creación del PNR.
+     * Se llama DESPUÉS de hotelSell() y ANTES de addMultiElements('end')
+     *
+     * CÁLCULO DE FECHA:
+     * - Fecha base: check_out_date + 7 días (disponibilidad default de Amadeus)
+     * - Fecha retention: fecha base + retention_months
+     * - Límite máximo: HOY + 361 días (límite de Amadeus)
+     *
+     * @param array $params
+     *   - check_out_date: Fecha de checkout del hotel (Y-m-d o Carbon) - REQUERIDO para cálculo correcto
+     *   - retention_months: Meses para mantener el PNR activo (default: 6)
+     *   - city_code: Código de ciudad (default: 'MTY', recomendado: usar mismo que officeId)
+     *   - passenger_count: Número de pasajeros en el PNR (default: 1)
+     *   - free_text: Texto descriptivo opcional (default: 'HOTEL BOOKING RETENTION')
+     *
+     * @return DOMXPath Response from PNR_AddMultiElements
+     */
+    public function addRetentionLine($params = [])
+    {
+        $retentionMonths = $params['retention_months'] ?? 6;
+        $cityCode = $params['city_code'] ?? 'MTY';
+        $passengerCount = $params['passenger_count'] ?? 1;
+        $freeText = $params['free_text'] ?? 'HOTEL BOOKING RETENTION';
+        $checkOutDate = $params['check_out_date'] ?? null;
+
+        // Calcular fecha de retención: check-out + 7 días + meses adicionales
+        // Según Amadeus: PNR disponible 7 días post check-out por default
+        if ($checkOutDate) {
+            $baseDate = \Carbon\Carbon::parse($checkOutDate)->addDays(7);
+        } else {
+            // Fallback si no se proporciona check-out (usar fecha actual)
+            $baseDate = \Carbon\Carbon::now();
+        }
+
+        $retentionDate = $baseDate->copy()->addMonths($retentionMonths);
+
+        // Validar límite máximo de Amadeus: 361 días desde HOY
+        $maxDate = \Carbon\Carbon::now()->addDays(361);
+        if ($retentionDate->greaterThan($maxDate)) {
+            $retentionDate = $maxDate;
+        }
+
+        // Formato DDMMYY para Amadeus: 03OCT23 -> 031023
+        $formattedDate = $retentionDate->format('dmy');
+
+        // Estructura OFICIAL de Amadeus para retention line
+        $body = [
+            'pnrActions' => [
+                'optionCode' => '0'  // 0 = agregar elementos (NO finalizar)
+            ],
+            'originDestinationDetails' => [
+                'originDestination' => [],  // CRÍTICO: vacío pero requerido
+                'itineraryInfo' => [
+                    'elementManagementItinerary' => [
+                        'segmentName' => 'RU'  // RU = Miscellaneous/Retention segment
+                    ],
+                    'airAuxItinerary' => [  // CRÍTICO: todo va dentro de airAuxItinerary
+                        'travelProduct' => [
+                            'product' => [
+                                'depDate' => $formattedDate  // Fecha hasta que el PNR estará activo
+                            ],
+                            'boardpointDetail' => [
+                                'cityCode' => $cityCode  // Cualquier ciudad, usualmente mismo que officeId
+                            ],
+                            'company' => [
+                                'identification' => '1A'  // Siempre 1A (Amadeus)
+                            ]
+                        ],
+                        'messageAction' => [  // CORRECTO: messageAction (no itineraryMessageAction)
+                            'business' => [
+                                'function' => '32'  // Function code para retention
+                            ]
+                        ],
+                        'relatedProduct' => [
+                            'quantity' => $passengerCount,
+                            'status' => 'HK'  // HK = Have Kept (Confirmed)
+                        ],
+                        'freetextItinerary' => [  // Opcional pero recomendado
+                            'freetextDetail' => [
+                                'subjectQualifier' => '3'
+                            ],
+                            'longFreetext' => $freeText  // Hasta 199 caracteres
+                        ]
+                    ]
+                ]
+            ]
+        ];
+
+        return self::PNR_AddMultiElements([$body]);
+    }
+
+    /**
      * @throws Exception
      */
     public function recursiveHotelSearch($type = 'multi', array $params): DOMXPath|RedirectResponse
